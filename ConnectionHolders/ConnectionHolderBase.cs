@@ -3,18 +3,19 @@
     using System;
     using System.Collections.Generic;
     using System.ComponentModel;
-    using System.Linq;
-    using System.Text;
     using System.Threading;
     using System.Timers;
+    using log4net;
     using Timer = System.Timers.Timer;
 
     /// <summary>
     /// Базовый класс для всех держателей подключений.
     /// </summary>
-    internal abstract class ConnectionHolderBase<TConnection> 
+    public abstract class ConnectionHolderBase<TConnection> 
         : IConnectionHolder<TConnection>
     {
+        private static readonly ILog logger = LogManager.GetLogger("ConnectionHolderBase");
+
         private string holderName;
         private TimeSpan reconnectionInterval;
         private TimeSpan checkConnectionInterval;
@@ -22,12 +23,15 @@
         private bool isWorking;
         private object stateLock = new object();
 
+        private List<IConnectionHolderCallback<TConnection>> listeners = 
+            new List<IConnectionHolderCallback<TConnection>>();
+
         private Mutex connectionLock;
 
         private BackgroundWorker backgroundWorker;
         private Timer reconnectionTimer;
 
-        private ConnectionHolders.ConnectionState lastState;
+        private ConnectionState lastState;
 
         protected ConnectionHolderBase() {
             holderName = "undefined";
@@ -37,7 +41,7 @@
 
             connectionLock = new Mutex();            
 
-            reconnectionTimer = new Timer(0);
+            reconnectionTimer = new Timer(reconnectionInterval.TotalMilliseconds);
             reconnectionTimer.Elapsed += ReconnectionTimerTick;
 
             backgroundWorker = new BackgroundWorker();
@@ -55,7 +59,7 @@
                 throw new ArgumentNullException(aHolderName);
             }
 
-            holderName = aHolderName;
+            holderName = aHolderName;            
         }
 
         public TimeSpan GetReconnectionInterval()
@@ -80,7 +84,8 @@
 
         public void Start()
         {
-            lock (stateLock) {                
+            lock (stateLock) {        
+                logger.Info(GetHolderName() + " - запуск держателя подключения.");
                 isWorking = true;
                 reconnectionTimer.Start();
             }
@@ -89,6 +94,7 @@
         public void Stop()
         {
             lock (stateLock) {
+                logger.Info(GetHolderName() + " - остановка держателя подключения.");
                 isWorking = false;
                 reconnectionTimer.Stop();
             }
@@ -102,7 +108,9 @@
         public void Dispose()
         {
             Stop();
-            FreeConnection();
+            TryFreeConnection();
+            lastState = ConnectionState.DISCONNECTED;
+            AlertListeners(lastState);
         }
 
         public TConnection WaitConnection() 
@@ -116,6 +124,38 @@
             connectionLock.ReleaseMutex();
         }
 
+        public void Subscribe(IConnectionHolderCallback<TConnection> aCallback)
+        {
+            if (aCallback == null) {
+                throw new ArgumentNullException("aCallback");
+            }
+
+            lock (listeners) {
+                listeners.Add(aCallback);
+            }
+        }
+
+        public void Unsubscribe(IConnectionHolderCallback<TConnection> aCallback)
+        {
+            if (aCallback == null) {
+                throw new ArgumentNullException("aCallback");
+            }
+
+            lock (listeners) {
+                if (!listeners.Contains(aCallback)) {
+                    throw new ArgumentException("Callback не увляется подписчиком.");
+                }
+
+                listeners.Remove(aCallback);
+            }
+        }
+
+        /// <summary>
+        /// Делает попытку подключения.
+        /// </summary>
+        /// <returns>True - если подключение выполнено, false - иначе.</returns>
+        public abstract bool TryConnect();
+
         /// <summary>
         /// Возвращает подключение.
         /// </summary>
@@ -125,13 +165,7 @@
         /// <summary>
         /// Освобождает ресурсы подключения.
         /// </summary>
-        protected abstract void FreeConnection();
-
-        /// <summary>
-        /// Делает попытку подключения.
-        /// </summary>
-        /// <returns>True - если подключение выполнено, false - иначе.</returns>
-        protected abstract bool TryConnect();
+        protected abstract void TryFreeConnection();        
 
         /// <summary>
         /// Тестирует подключение.
@@ -157,20 +191,47 @@
         /// <param name="sender"></param>
         /// <param name="e"></param>
         private void DoCheckAndReconnection(object sender, DoWorkEventArgs e)
-        {
+        {            
             if (TryCheckConnection()) {
-                if (lastState == ConnectionState.DISCONNECTED) {
+                logger.Info(GetHolderName() + " - проверка подключения: успешно.");
+                if (lastState == ConnectionState.DISCONNECTED) {                    
                     reconnectionTimer.Interval = checkConnectionInterval.TotalMilliseconds;
                     lastState = ConnectionState.CONNECTED;
+                    AlertListeners(lastState);
                 }                
             }
             else {
-                if (lastState == ConnectionState.CONNECTED) {
+                logger.Info(GetHolderName() + " - проверка подключения: НЕ успешно.");
+                if (lastState == ConnectionState.CONNECTED) {                    
+                    reconnectionTimer.Interval = reconnectionInterval.TotalMilliseconds;
                     lastState = ConnectionState.DISCONNECTED;
-                    reconnectionTimer.Interval = reconnectionInterval.TotalMilliseconds;                
+                    AlertListeners(lastState);
                 }
                 TryConnect();
             }
-        }        
+        }
+
+        /// <summary>
+        /// Оповещает всех подписанных слушателей.
+        /// </summary>
+        /// <param name="aConnectionState">Состояние.</param>
+        private void AlertListeners(ConnectionState aConnectionState)
+        {
+            lock (listeners) {
+                foreach (var listener in listeners) {
+                    try {
+                        if (aConnectionState == ConnectionState.CONNECTED) {
+                            listener.OnConnected(this);
+                        }
+                        else {
+                            listener.OnDisconnected(this);
+                        }
+                    }
+                    catch (Exception ex) {
+                        logger.Error("Ошибка при оповещении слушателя: " + ex.Message);
+                    }
+                }
+            }
+        }
     }
 }

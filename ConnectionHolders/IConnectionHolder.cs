@@ -70,5 +70,22 @@
         /// Освобождает подключение.
         /// </summary>
         void ReleaseConnection();
+
+        /// <summary>
+        /// Подписывает callback на оповещения.
+        /// </summary>
+        /// <param name="aCallback">Callback.</param>
+        void Subscribe(IConnectionHolderCallback<TConnection> aCallback);
+
+        /// <summary>
+        /// Отписывает Callback от оповещений.
+        /// </summary>
+        /// <param name="aCallback">Callback.</param>
+        void Unsubscribe(IConnectionHolderCallback<TConnection> aCallback);
+
+        /// <summary>
+        /// Открывает соединение.
+        /// </summary>
+        bool TryConnect();
     }
 }
